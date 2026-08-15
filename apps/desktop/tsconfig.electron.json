@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The Electron main + preload processes are CommonJS. Keeping them separate
+    // from the renderer's ESM build is deliberate: better-sqlite3 is a native
+    // CJS addon and cannot be bundled into the renderer.
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2023"],
+    "rootDir": "./electron",
+    "outDir": "./dist-electron",
+    "types": ["node"],
+    "verbatimModuleSyntax": false,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["electron/**/*"]
+}

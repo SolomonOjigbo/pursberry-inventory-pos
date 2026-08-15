@@ -1,0 +1,19 @@
+appId: com.pursberry.pos
+productName: Pursberry POS
+directories:
+  output: release
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+# better-sqlite3 is a native addon — it must ship unpacked, not inside the asar.
+asarUnpack:
+  - '**/node_modules/better-sqlite3/**'
+win:
+  target: [nsis]
+mac:
+  target: [dmg]
+  category: public.app-category.business
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

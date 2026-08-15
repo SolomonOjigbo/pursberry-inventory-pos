@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pursberry-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pursberry
+      POSTGRES_PASSWORD: pursberry_dev
+      POSTGRES_DB: pursberry_dev
+    ports:
+      # 5433 on the host so it does not collide with a local Postgres.app on 5432
+      - '5433:5432'
+    volumes:
+      - pursberry_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U pursberry -d pursberry_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: pursberry-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6379:6379'
+    volumes:
+      - pursberry_redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pursberry_pgdata:
+  pursberry_redisdata:

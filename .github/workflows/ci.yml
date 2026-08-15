@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pursberry
+          POSTGRES_PASSWORD: pursberry_dev
+          POSTGRES_DB: pursberry_dev
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U pursberry"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://pursberry_app:pursberry_dev@localhost:5433/pursberry_dev?schema=public
+      DIRECT_DATABASE_URL: postgresql://pursberry:pursberry_dev@localhost:5433/pursberry_dev?schema=public
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: ci-access-secret-not-a-real-key
+      JWT_REFRESH_SECRET: ci-refresh-secret-not-a-real-key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      - name: Bootstrap the non-owner app role
+        run: psql "$DIRECT_DATABASE_URL" -f packages/db/prisma/sql/00_bootstrap_roles.sql
+
+      - name: Apply migrations
+        run: pnpm --filter @pursberry/db migrate:deploy
+
+      - name: Apply RLS policies
+        run: psql "$DIRECT_DATABASE_URL" -f packages/db/prisma/sql/10_rls_policies.sql
+
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build

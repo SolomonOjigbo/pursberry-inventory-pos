@@ -1,0 +1,229 @@
+// Pursberry data model.
+//
+// SCOPE: this file currently covers the Phase 1 / Sprint 1 tenancy spine only —
+// TEN-101/103/104/105 and BILL-101/104. The Product, Inventory, Accounting, POS,
+// Sync and Procurement models from plan §3 land with their own tickets; see
+// docs/DATA-MODEL.md for the intended shape and the invariants each must keep.
+//
+// TWO RULES EVERY NEW MODEL MUST FOLLOW:
+//   1. Carry `tenantId` (mapped to `tenant_id`) unless it is a platform-level
+//      table (subscription_plans, super_admin_users).
+//   2. Get an RLS policy in the same migration that creates it. A table without
+//      a policy is readable across tenants and silently breaks TEN-105.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // App role — non-owner, so RLS actually applies to it.
+  url       = env("DATABASE_URL")
+  // Owner role — used by `prisma migrate` only.
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Platform level (NOT tenant-scoped)
+// ---------------------------------------------------------------------------
+
+enum PlanTier {
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+/// BILL-101. Limits are soft caps (plan §4.9) — crossing one raises an upgrade
+/// prompt and a 7-day grace period, it does not hard-block the till.
+model SubscriptionPlan {
+  id             String   @id @default(uuid()) @db.Uuid
+  tier           PlanTier
+  name           String
+  /// Base fee in minor units (kobo). Never a float — see packages/shared/src/money.ts.
+  baseFeeMinor   Int      @map("base_fee_minor")
+  currency       String   @default("NGN") @db.Char(3)
+  maxRegisters   Int?     @map("max_registers")
+  maxSkus        Int?     @map("max_skus")
+  maxTxnsPerCycle Int?    @map("max_txns_per_cycle")
+  maxBranches    Int?     @map("max_branches")
+  /// Per-extra-branch/register add-on fee for Enterprise, in minor units.
+  addOnFeeMinor  Int?     @map("add_on_fee_minor")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  subscriptions TenantSubscription[]
+
+  @@map("subscription_plans")
+}
+
+/// Separate role hierarchy from tenant users (plan §4.9) — a super-admin is not
+/// a tenant member and must never be resolvable through tenant RBAC.
+model SuperAdminUser {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  fullName     String   @map("full_name")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("super_admin_users")
+}
+
+// ---------------------------------------------------------------------------
+// Tenant level
+// ---------------------------------------------------------------------------
+
+enum TenantStatus {
+  TRIALING
+  ACTIVE
+  GRACE
+  SUSPENDED
+}
+
+/// TEN-101. The root of every tenant-scoped query.
+model Tenant {
+  id           String       @id @default(uuid()) @db.Uuid
+  name         String
+  slug         String       @unique
+  status       TenantStatus @default(TRIALING)
+  /// BILL-104: set once on first REAL usage, not at signup. Anchors the 30-day
+  /// free window and every subsequent billing cycle (plan §4.9). Must never reset.
+  firstUseDate DateTime?    @map("first_use_date")
+  /// Plan §4.5: WAC by default, forced to FIFO once batch/expiry tracking is on.
+  costingMethod CostingMethod @default(WEIGHTED_AVERAGE) @map("costing_method")
+  vatInclusivePricing Boolean @default(false) @map("vat_inclusive_pricing")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  memberships  Membership[]
+  branches     Branch[]
+  warehouses   Warehouse[]
+  subscriptions TenantSubscription[]
+
+  @@map("tenants")
+}
+
+enum CostingMethod {
+  WEIGHTED_AVERAGE
+  FIFO
+}
+
+/// A person. Global by email so one human can belong to several tenants; all
+/// authorisation flows through Membership, never through this row directly.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  fullName     String   @map("full_name")
+  phone        String?
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  memberships Membership[]
+
+  @@map("users")
+}
+
+enum TenantRole {
+  OWNER
+  BRANCH_MANAGER
+  ACCOUNTANT
+  CASHIER
+}
+
+/// TEN-103. Joins a user to a tenant with a role, optionally pinned to a branch
+/// (a Cashier is scoped to the till's branch; an Owner is tenant-wide).
+model Membership {
+  id        String     @id @default(uuid()) @db.Uuid
+  tenantId  String     @map("tenant_id") @db.Uuid
+  userId    String     @map("user_id") @db.Uuid
+  role      TenantRole
+  branchId  String?    @map("branch_id") @db.Uuid
+  isActive  Boolean    @default(true) @map("is_active")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([userId])
+  @@map("memberships")
+}
+
+/// TEN-104.
+model Branch {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  code      String
+  address   String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  warehouses  Warehouse[]
+  memberships Membership[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("branches")
+}
+
+/// TEN-104. A warehouse is stock-holding but not till-serving; PROD-204 moves
+/// stock between these and branches.
+model Warehouse {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  branchId  String?  @map("branch_id") @db.Uuid
+  name      String
+  code      String
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("warehouses")
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  GRACE
+  CANCELLED
+}
+
+/// BILL-101/104/202. `cycleAnchorAt` is per tenant (firstUseDate + 30d), NOT a
+/// shared calendar month — see plan §4.9 and BILL-202's acceptance criterion.
+model TenantSubscription {
+  id            String             @id @default(uuid()) @db.Uuid
+  tenantId      String             @map("tenant_id") @db.Uuid
+  planId        String             @map("plan_id") @db.Uuid
+  status        SubscriptionStatus @default(TRIALING)
+  cycleAnchorAt DateTime?          @map("cycle_anchor_at")
+  currentCycleStart DateTime?      @map("current_cycle_start")
+  currentCycleEnd   DateTime?      @map("current_cycle_end")
+  /// Set when a soft cap is crossed; enforcement waits 7 days from here (BILL-204).
+  graceStartedAt DateTime?         @map("grace_started_at")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan   SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  @@index([tenantId])
+  @@index([cycleAnchorAt])
+  @@map("tenant_subscriptions")
+}
